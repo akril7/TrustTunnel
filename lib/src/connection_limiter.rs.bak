@@ -66,38 +66,6 @@ impl ConnectionLimiter {
         }
     }
 
-    /// Replace the set of known clients while preserving active connection
-    /// counters for clients whose credentials are still present.
-    ///
-    /// Removed clients lose their map entry; their live `ConnectionGuard`s will
-    /// simply find no entry on drop, which is safe (counters saturate at zero).
-    pub fn reload_clients(&self, clients: &[Client]) {
-        let mut map = self.clients.lock().unwrap();
-
-        let mut new_map: HashMap<String, ClientEntry> =
-            HashMap::with_capacity(clients.len());
-
-        for c in clients {
-            let key = BASE64_ENGINE.encode(format!("{}:{}", c.username, c.password));
-            let (http2_count, http3_count) = map
-                .get(&key)
-                .map(|e| (e.http2_count, e.http3_count))
-                .unwrap_or((0, 0));
-
-            new_map.insert(
-                key,
-                ClientEntry {
-                    max_http2: c.max_http2_conns,
-                    max_http3: c.max_http3_conns,
-                    http2_count,
-                    http3_count,
-                },
-            );
-        }
-
-        *map = new_map;
-    }
-
     /// Try to acquire a connection slot for the given credentials and protocol.
     ///
     /// Returns `Some(guard)` on success — the guard releases the slot on drop.

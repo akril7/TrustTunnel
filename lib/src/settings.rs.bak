@@ -1571,23 +1571,36 @@ where
     deserializer.deserialize_str(Visitor)
 }
 
-/// Load the client registry from a credentials file on disk.
-///
-/// Used both by the serde deserializer at startup and by `SIGUSR1` reloads.
-pub fn load_clients(path: &str) -> Result<Vec<Client>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Couldn't read file: path={} error={}", path, e))?;
+fn deserialize_clients<'de, D>(deserializer: D) -> Result<Vec<Client>, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let path = deserialize_file_path(deserializer)?;
 
-    let clients: Document = content
-        .parse()
-        .map_err(|e| format!("Couldn't parse file: path={} error={}", path, e))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        serde::de::Error::invalid_value(
+            serde::de::Unexpected::Other(&format!("Couldn't read file: path={} error={}", path, e)),
+            &"A readable file",
+        )
+    })?;
 
-    let tables = clients
+    let clients: Document = content.parse().map_err(|e| {
+        serde::de::Error::invalid_value(
+            serde::de::Unexpected::Other(&format!(
+                "Couldn't parse file: path={} error={}",
+                path, e
+            )),
+            &"A TOML-formatted file",
+        )
+    })?;
+
+    let res: Vec<Client> = clients
         .get("client")
         .and_then(Item::as_array_of_tables)
-        .ok_or_else(|| "Not an array of clients".to_string())?;
-
-    tables
+        .ok_or(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Other("Not an array of clients"),
+            &"An array of clients",
+        ))?
         .iter()
         .enumerate()
         .map(|(idx, x)| {
@@ -1595,10 +1608,16 @@ pub fn load_clients(path: &str) -> Result<Vec<Client>, String> {
             let password = demangle_toml_string(x["password"].to_string());
 
             if username.is_empty() {
-                return Err(format!("Client #{}: username cannot be empty", idx + 1));
+                return Err(serde::de::Error::custom(format!(
+                    "Client #{}: username cannot be empty",
+                    idx + 1
+                )));
             }
             if password.is_empty() {
-                return Err(format!("Client #{}: password cannot be empty", idx + 1));
+                return Err(serde::de::Error::custom(format!(
+                    "Client #{}: password cannot be empty",
+                    idx + 1
+                )));
             }
 
             let max_http2_conns = x
@@ -1617,15 +1636,9 @@ pub fn load_clients(path: &str) -> Result<Vec<Client>, String> {
                 max_http3_conns,
             })
         })
-        .collect()
-}
+        .collect::<Result<Vec<_>, _>>()?;
 
-fn deserialize_clients<'de, D>(deserializer: D) -> Result<Vec<Client>, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let path = deserialize_file_path(deserializer)?;
-    load_clients(&path).map_err(serde::de::Error::custom)
+    Ok(res)
 }
 
 fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngine>, D::Error>

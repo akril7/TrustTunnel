@@ -1,6 +1,5 @@
 pub mod registry_based;
 
-use crate::authentication::registry_based::Client;
 use crate::log_utils;
 use std::borrow::Cow;
 
@@ -42,12 +41,6 @@ pub trait Authenticator: Send + Sync {
     fn username(&self, _source: &Source<'_>) -> Option<String> {
         None
     }
-
-    /// Replace the registry of clients used for authentication.
-    ///
-    /// Existing sessions are not affected: only subsequent authentication
-    /// checks use the new list. Default implementation is a no-op.
-    fn reload_clients(&self, _clients: &[Client]) {}
 }
 
 impl Source<'_> {

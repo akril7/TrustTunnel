@@ -4,7 +4,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 /// A client descriptor
 #[derive(Deserialize)]
@@ -27,25 +26,21 @@ pub struct Client {
 /// Is only able to authenticate a client using the Proxy basic authorization.
 pub struct RegistryBasedAuthenticator {
     /// Maps the base64-encoded `username:password` credentials to the username.
-    clients: RwLock<HashMap<String, String>>,
-}
-
-fn build_clients_map(clients: &[Client]) -> HashMap<String, String> {
-    clients
-        .iter()
-        .map(|x| {
-            (
-                BASE64_ENGINE.encode(format!("{}:{}", x.username, x.password)),
-                x.username.clone(),
-            )
-        })
-        .collect()
+    clients: HashMap<String, String>,
 }
 
 impl RegistryBasedAuthenticator {
     pub fn new(clients: &[Client]) -> Self {
         Self {
-            clients: RwLock::new(build_clients_map(clients)),
+            clients: clients
+                .iter()
+                .map(|x| {
+                    (
+                        BASE64_ENGINE.encode(format!("{}:{}", x.username, x.password)),
+                        x.username.clone(),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -60,7 +55,7 @@ impl Authenticator for RegistryBasedAuthenticator {
             authentication::Source::ProxyBasic(str) => str,
             authentication::Source::Sni(str) => str,
         };
-        if self.clients.read().unwrap().contains_key(creds.as_ref()) {
+        if self.clients.contains_key(creds.as_ref()) {
             authentication::Status::Pass
         } else {
             authentication::Status::Reject
@@ -72,11 +67,7 @@ impl Authenticator for RegistryBasedAuthenticator {
             authentication::Source::ProxyBasic(str) => str,
             authentication::Source::Sni(str) => str,
         };
-        self.clients.read().unwrap().get(creds.as_ref()).cloned()
-    }
-
-    fn reload_clients(&self, clients: &[Client]) {
-        *self.clients.write().unwrap() = build_clients_map(clients);
+        self.clients.get(creds.as_ref()).cloned()
     }
 }
 

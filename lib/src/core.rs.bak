@@ -118,13 +118,21 @@ impl Core {
 
         let (fatal_error, _fatal_error_rx) = watch::channel(None);
 
-        // Always present so that `reload_clients` can enable limits later without
-        // a restart. When no limits are configured `try_acquire` is a no-op.
-        let connection_limiter = Some(Arc::new(ConnectionLimiter::new(
-            &settings.clients,
-            settings.default_max_http2_conns_per_client,
-            settings.default_max_http3_conns_per_client,
-        )));
+        let connection_limiter = if settings.default_max_http2_conns_per_client.is_some()
+            || settings.default_max_http3_conns_per_client.is_some()
+            || settings
+                .clients
+                .iter()
+                .any(|c| c.max_http2_conns.is_some() || c.max_http3_conns.is_some())
+        {
+            Some(Arc::new(ConnectionLimiter::new(
+                &settings.clients,
+                settings.default_max_http2_conns_per_client,
+                settings.default_max_http3_conns_per_client,
+            )))
+        } else {
+            None
+        };
 
         let per_client_metrics = settings
             .metrics
@@ -154,31 +162,6 @@ impl Core {
                 connection_limiter,
             }),
         })
-    }
-
-    /// Reload the client credentials without interrupting active sessions.
-    ///
-    /// Updates the authenticator registry and (if present) the per-client
-    /// connection limits. Other endpoint settings are not touched.
-    pub fn reload_clients(
-        &self,
-        clients: Vec<authentication::registry_based::Client>,
-    ) -> io::Result<()> {
-        match self.context.authenticator.as_ref() {
-            Some(authenticator) => authenticator.reload_clients(&clients),
-            None => {
-                return Err(io::Error::other(
-                    "Endpoint was started without a credentials file; \
-                     restart is required to enable authentication",
-                ));
-            }
-        }
-
-        if let Some(limiter) = self.context.connection_limiter.as_ref() {
-            limiter.reload_clients(&clients);
-        }
-
-        Ok(())
     }
 
     /// Run an endpoint instance inside the caller provided asynchronous runtime.
