@@ -1,4 +1,5 @@
 use log::{debug, error, info, warn, LevelFilter};
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -518,6 +519,24 @@ fn main() {
         async move { core.listen().await }
     };
 
+    let reload_clients_task = {
+        let settings_path = settings_path.clone();
+        let core = core.clone();
+        async move {
+            let mut sigusr1 = signal::unix::signal(signal::unix::SignalKind::user_defined1())
+                .expect("Couldn't start SIGUSR1 listener");
+
+            loop {
+                sigusr1.recv().await;
+                info!("Reloading client credentials");
+                match reload_clients(&settings_path, &core) {
+                    Ok(()) => info!("Client credentials successfully reloaded"),
+                    Err(e) => error!("Failed to reload client credentials: {}", e),
+                }
+            }
+        }
+    };
+
     let reload_tls_hosts_task = {
         let tls_hosts_settings_path = tls_hosts_settings_path.clone();
         async move {
@@ -559,6 +578,10 @@ fn main() {
             },
             _ = reload_tls_hosts_task => {
                 error!("Error while reloading TLS hosts");
+                1
+            },
+            _ = reload_clients_task => {
+                error!("Client credentials reload listener stopped unexpectedly");
                 1
             },
             _ = interrupt_task => {
@@ -669,6 +692,49 @@ fn parse_endpoint_address(input: &str, default_port: u16) -> String {
     } else {
         format!("{input}:{default_port}")
     }
+}
+
+/// Reload the `credentials_file` referenced by the settings file
+/// and update the running core's client registry.
+fn reload_clients(settings_path: &str, core: &Core) -> io::Result<()> {
+    let contents = std::fs::read_to_string(settings_path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("Couldn't read the settings file: {}", e),
+        )
+    })?;
+
+    let credentials_path =
+        extract_credentials_file_path(&contents, settings_path).ok_or_else(|| {
+            io::Error::other("credentials_file is not configured in the settings file")
+        })?;
+
+    let credentials_path = credentials_path
+        .to_str()
+        .ok_or_else(|| io::Error::other("credentials_file path is not valid UTF-8"))?;
+
+    let clients = settings::load_clients(credentials_path)
+        .map_err(|e| io::Error::other(format!("Failed to load clients: {}", e)))?;
+
+    core.reload_clients(clients)
+}
+
+fn extract_credentials_file_path(
+    settings_contents: &str,
+    settings_path: &str,
+) -> Option<PathBuf> {
+    let value = settings_contents.parse::<toml::Value>().ok()?;
+    let credentials_file = value.get("credentials_file")?.as_str()?;
+    let path = Path::new(credentials_file);
+
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+
+    let settings_dir = Path::new(settings_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    Some(settings_dir.join(path))
 }
 
 #[cfg(test)]

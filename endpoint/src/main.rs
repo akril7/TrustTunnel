@@ -519,43 +519,56 @@ fn main() {
         async move { core.listen().await }
     };
 
-    let reload_clients_task = {
-        let settings_path = settings_path.clone();
-        let core = core.clone();
-        async move {
-            let mut sigusr1 = signal::unix::signal(signal::unix::SignalKind::user_defined1())
-                .expect("Couldn't start SIGUSR1 listener");
-
-            loop {
-                sigusr1.recv().await;
-                info!("Reloading client credentials");
-                match reload_clients(&settings_path, &core) {
-                    Ok(()) => info!("Client credentials successfully reloaded"),
-                    Err(e) => error!("Failed to reload client credentials: {}", e),
-                }
-            }
-        }
-    };
-
     let reload_tls_hosts_task = {
         let tls_hosts_settings_path = tls_hosts_settings_path.clone();
+        let settings_path = settings_path.clone();
+        let core = core.clone();
         async move {
             let mut sighup_listener = signal::unix::signal(signal::unix::SignalKind::hangup())
                 .expect("Couldn't start SIGHUP listener");
 
             loop {
                 sighup_listener.recv().await;
-                info!("Reloading TLS hosts settings");
+                info!("SIGHUP received, reloading TLS hosts settings and client credentials");
 
-                let tls_hosts_settings: settings::TlsHostsSettings = toml::from_str(
-                    &std::fs::read_to_string(&tls_hosts_settings_path)
-                        .expect("Couldn't read the TLS hosts settings file"),
+                // 1) TLS hosts. Existing sessions stay up; new connections pick up
+                //    the new certificates/SNIs.
+                let tls_hosts_settings: settings::TlsHostsSettings = match std::fs::read_to_string(
+                    &tls_hosts_settings_path,
                 )
-                .expect("Couldn't parse the TLS hosts settings file");
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("Couldn't read the TLS hosts settings file: {}", e),
+                    )
+                })
+                .and_then(|contents| {
+                    toml::from_str::<settings::TlsHostsSettings>(&contents).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Couldn't parse the TLS hosts settings file: {}", e),
+                        )
+                    })
+                }) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("Failed to reload TLS hosts settings: {}", e);
+                        continue;
+                    }
+                };
 
-                core.reload_tls_hosts_settings(tls_hosts_settings)
-                    .expect("Couldn't apply new settings");
+                if let Err(e) = core.reload_tls_hosts_settings(tls_hosts_settings) {
+                    error!("Failed to apply TLS hosts settings: {}", e);
+                    continue;
+                }
                 info!("TLS hosts settings are successfully reloaded");
+
+                // 2) Client credentials. Failures here are non-fatal: the previously
+                //    loaded client list keeps working.
+                match reload_clients(&settings_path, &core) {
+                    Ok(()) => info!("Client credentials successfully reloaded"),
+                    Err(e) => error!("Failed to reload client credentials: {}", e),
+                }
             }
         }
     };
@@ -578,10 +591,6 @@ fn main() {
             },
             _ = reload_tls_hosts_task => {
                 error!("Error while reloading TLS hosts");
-                1
-            },
-            _ = reload_clients_task => {
-                error!("Client credentials reload listener stopped unexpectedly");
                 1
             },
             _ = interrupt_task => {
